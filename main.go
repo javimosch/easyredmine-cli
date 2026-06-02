@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const Version = "1.0.0"
@@ -69,6 +70,44 @@ type ErrorInfo struct {
 	Message     string   `json:"message"`
 	Recoverable bool     `json:"recoverable"`
 	Suggestions []string `json:"suggestions,omitempty"`
+}
+
+type IssueListResponse struct {
+	Issues     []IssueListItem `json:"issues"`
+	TotalCount int             `json:"total_count"`
+	Offset     int             `json:"offset"`
+	Limit      int             `json:"limit"`
+}
+
+type IssueListItem struct {
+	ID        int    `json:"id"`
+	Project   IDName `json:"project"`
+	Tracker   IDName `json:"tracker"`
+	Status    IDName `json:"status"`
+	Priority  IDName `json:"priority"`
+	Author    IDName `json:"author"`
+	Subject   string `json:"subject"`
+	CreatedOn string `json:"created_on"`
+	UpdatedOn string `json:"updated_on"`
+}
+
+type SearchResult struct {
+	Results  []SearchHit `json:"results"`
+	Total    int         `json:"total"`
+	Returned int         `json:"returned"`
+	Query    string      `json:"query"`
+	Words    []string    `json:"words"`
+}
+
+type SearchHit struct {
+	ID           int      `json:"id"`
+	Subject      string   `json:"subject"`
+	Project      IDName   `json:"project"`
+	Status       IDName   `json:"status"`
+	Priority     IDName   `json:"priority"`
+	MatchCount   int      `json:"match_count"`
+	MatchedWords []string `json:"matched_words"`
+	UpdatedOn    string   `json:"updated_on"`
 }
 
 func main() {
@@ -140,12 +179,14 @@ func handleIssue(args []string) {
 
 	if len(args) < 1 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(os.Stderr, "Usage: easyredmine-cli issue <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "Subcommands: show, comment, edit")
+		fmt.Fprintln(os.Stderr, "Subcommands: search, show, comment, edit")
 		os.Exit(85)
 	}
 
 	sub := args[0]
 	switch sub {
+	case "search":
+		handleIssueSearch(args[1:])
 	case "show":
 		handleIssueShow(args[1:])
 	case "comment":
@@ -154,6 +195,259 @@ func handleIssue(args []string) {
 		handleIssueEdit(args[1:])
 	default:
 		exitErr(85, "invalid_argument", fmt.Sprintf("Unknown issue subcommand: %s", sub), false, []string{"Run: easyredmine-cli help"})
+	}
+}
+
+// --- smart search ---
+
+var stopWords = map[string]bool{
+	"le": true, "la": true, "les": true, "de": true, "des": true, "du": true,
+	"un": true, "une": true, "dans": true, "pour": true, "sur": true, "par": true,
+	"avec": true, "est": true, "sont": true, "pas": true, "non": true, "et": true,
+	"ou": true, "mais": true, "que": true, "qui": true, "dont": true, "au": true,
+	"aux": true, "ce": true, "ces": true, "cet": true, "cette": true, "se": true,
+	"sa": true, "son": true, "ses": true, "lui": true, "elle": true, "ils": true,
+	"elles": true, "nous": true, "vous": true, "en": true, "y": true,
+	"ne": true, "plus": true, "très": true, "tout": true, "tous": true, "toute": true,
+	"toutes": true, "chaque": true, "quelque": true, "quelques": true, "peut": true,
+	"peuvent": true, "fait": true, "faire": true, "être": true, "avoir": true,
+	"the": true, "a": true, "an": true, "in": true, "on": true, "at": true,
+	"to": true, "for": true, "of": true, "by": true, "with": true, "from": true,
+	"as": true, "but": true, "or": true, "if": true, "so": true,
+	"no": true, "not": true, "is": true, "are": true, "was": true, "were": true,
+	"be": true, "been": true, "being": true, "have": true, "has": true, "had": true,
+	"do": true, "does": true, "did": true, "will": true, "would": true, "can": true,
+	"could": true, "should": true, "may": true, "might": true, "shall": true,
+	"this": true, "that": true, "these": true, "those": true, "it": true, "its": true,
+	"i": true, "you": true, "he": true, "she": true, "we": true, "they": true,
+	"me": true, "him": true, "us": true, "them": true, "my": true,
+	"your": true, "his": true, "our": true, "their": true,
+}
+
+func tokenize(query string) []string {
+	raw := strings.Fields(strings.ToLower(query))
+	words := make([]string, 0, len(raw))
+	for _, w := range raw {
+		// strip common punctuation
+		w = strings.Trim(w, ".,;:!?\"'()[]{}<>«»")
+		if w == "" || stopWords[w] {
+			continue
+		}
+		words = append(words, w)
+	}
+	return words
+}
+
+func fetchIssuePage(cfg Config, status string, offset, limit int) ([]IssueListItem, error) {
+	url := fmt.Sprintf("%s/issues.json?status_id=%s&limit=%d&offset=%d&sort=id:asc",
+		strings.TrimRight(cfg.BaseURL, "/"), status, limit, offset)
+	body := doRequest(cfg, "GET", url, nil)
+
+	var resp IssueListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Issues, nil
+}
+
+// wordMatch returns true if any word in the slice appears in the haystack (case-insensitive).
+func wordMatch(haystack string, words []string) []string {
+	lower := strings.ToLower(haystack)
+	var matched []string
+	for _, w := range words {
+		if strings.Contains(lower, w) {
+			matched = append(matched, w)
+		}
+	}
+	return matched
+}
+
+func handleIssueSearch(args []string) {
+	query, remaining := extractPositional(args)
+	if query == "" {
+		exitErr(85, "invalid_argument", "Usage: easyredmine-cli issue search \"<phrase>\" [options]", false, nil)
+	}
+
+	fs := flag.NewFlagSet("search", flag.ExitOnError)
+	limit := fs.Int("limit", 20, "Max results (default 20)")
+	offset := fs.Int("offset", 0, "Result offset")
+	status := fs.String("status", "open", "Status filter: open, *, or numeric ID")
+	minMatches := fs.Int("min-matches", 1, "Minimum word matches to include")
+	fs.Parse(remaining)
+
+	words := tokenize(query)
+	if len(words) == 0 {
+		exitErr(85, "invalid_argument", "No searchable words in query (all stop words filtered)", false, nil)
+	}
+
+	cfg := resolveConfig()
+
+	// Step 1: count total open issues
+	countURL := fmt.Sprintf("%s/issues.json?status_id=%s&limit=1", strings.TrimRight(cfg.BaseURL, "/"), *status)
+	countBody := doRequest(cfg, "GET", countURL, nil)
+	var countResp IssueListResponse
+	if err := json.Unmarshal(countBody, &countResp); err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Error reading issue count: %v", err), false, nil)
+	}
+	totalIssues := countResp.TotalCount
+	if totalIssues == 0 {
+		result := SearchResult{Results: []SearchHit{}, Total: 0, Returned: 0, Query: query, Words: words}
+		if human() {
+			fmt.Println("No open issues to search")
+		} else {
+			outputJSON(result)
+		}
+		return
+	}
+
+	if !human() {
+		fmt.Fprintf(os.Stderr, `{"progress":{"total":%d,"fetched":0,"status":"fetching"}}`+"\n", totalIssues)
+	}
+
+	// Step 2: fetch all pages concurrently
+	pageSize := 100
+	numPages := (totalIssues + pageSize - 1) / pageSize
+
+	type pageResult struct {
+		issues []IssueListItem
+		err    error
+	}
+	ch := make(chan pageResult, numPages)
+
+	concurrency := 20
+	sem := make(chan struct{}, concurrency)
+
+	for p := 0; p < numPages; p++ {
+		go func(page int) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			off := page * pageSize
+			issues, err := fetchIssuePage(cfg, *status, off, pageSize)
+			if err != nil {
+				ch <- pageResult{err: err}
+				return
+			}
+			ch <- pageResult{issues: issues}
+		}(p)
+	}
+
+	// Collect all issues
+	allIssues := make([]IssueListItem, 0, totalIssues)
+	var lastErr error
+	for p := 0; p < numPages; p++ {
+		res := <-ch
+		if res.err != nil {
+			lastErr = res.err
+			continue
+		}
+		allIssues = append(allIssues, res.issues...)
+		if !human() {
+			fmt.Fprintf(os.Stderr, `{"progress":{"total":%d,"fetched":%d,"status":"fetching"}}`+"\n", totalIssues, len(allIssues))
+		}
+	}
+	close(ch)
+
+	if lastErr != nil {
+		exitErr(105, "integration_error", fmt.Sprintf("Error fetching issues: %v", lastErr), true, nil)
+	}
+
+	if !human() {
+		fmt.Fprintf(os.Stderr, `{"progress":{"total":%d,"fetched":%d,"status":"filtering"}}`+"\n", totalIssues, len(allIssues))
+	}
+
+	// Step 3: client-side word matching
+	type acc struct {
+		hit          SearchHit
+		matchCount   int
+		matchedWords []string
+	}
+	collected := make(map[int]*acc)
+
+	for _, item := range allIssues {
+		// Match in subject
+		matched := wordMatch(item.Subject, words)
+		if len(matched) == 0 {
+			continue
+		}
+
+		a := &acc{
+			hit: SearchHit{
+				ID:         item.ID,
+				Subject:    item.Subject,
+				Project:    item.Project,
+				Status:     item.Status,
+				Priority:   item.Priority,
+				UpdatedOn:  item.UpdatedOn,
+			},
+			matchCount:   len(matched),
+			matchedWords: matched,
+		}
+		collected[item.ID] = a
+	}
+
+	// Step 4: convert to slice
+	hits := make([]SearchHit, 0, len(collected))
+	for _, a := range collected {
+		if a.matchCount >= *minMatches {
+			a.hit.MatchCount = a.matchCount
+			a.hit.MatchedWords = a.matchedWords
+			hits = append(hits, a.hit)
+		}
+	}
+
+	// Step 5: sort by match_count desc, then updated_on desc
+	for i := 0; i < len(hits); i++ {
+		for j := i + 1; j < len(hits); j++ {
+			swap := false
+			if hits[j].MatchCount > hits[i].MatchCount {
+				swap = true
+			} else if hits[j].MatchCount == hits[i].MatchCount && hits[j].UpdatedOn > hits[i].UpdatedOn {
+				swap = true
+			}
+			if swap {
+				hits[i], hits[j] = hits[j], hits[i]
+			}
+		}
+	}
+
+	// Step 6: paginate
+	total := len(hits)
+	start := *offset
+	if start > total {
+		start = total
+	}
+	end := start + *limit
+	if end > total {
+		end = total
+	}
+
+	result := SearchResult{
+		Results:  hits[start:end],
+		Total:    total,
+		Returned: end - start,
+		Query:    query,
+		Words:    words,
+	}
+
+	if !human() {
+		fmt.Fprintf(os.Stderr, `{"progress":{"total":%d,"fetched":%d,"status":"done"}}`+"\n", totalIssues, len(allIssues))
+	}
+
+	if human() {
+		if len(result.Results) == 0 {
+			fmt.Println("No results")
+			return
+		}
+		fmt.Printf("Query: %s\n", result.Query)
+		fmt.Printf("Words: %s\n", strings.Join(result.Words, ", "))
+		fmt.Printf("Results: %d/%d (showing %d)\n\n", result.Total, result.Total, result.Returned)
+		for _, h := range result.Results {
+			fmt.Printf("  #%d [%s] %s\n", h.ID, h.Status.Name, h.Subject)
+			fmt.Printf("       Project: %s | Priority: %s | Matches: %d/%d\n",
+				h.Project.Name, h.Priority.Name, h.MatchCount, len(result.Words))
+		}
+	} else {
+		outputJSON(result)
 	}
 }
 
@@ -311,7 +605,7 @@ func doRequest(cfg Config, method, url string, body []byte) []byte {
 	req.Header.Set("X-Redmine-API-Key", cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		exitErr(105, "integration_error", fmt.Sprintf("API request failed: %v", err), true, nil)
@@ -415,6 +709,12 @@ func printHelp() {
 	fmt.Println("  easyredmine-cli <command> [options]")
 	fmt.Println()
 	fmt.Println("Commands:")
+	fmt.Println("  issue search <phrase>  Smart search (word-by-word, dedup, rank by match)")
+	fmt.Println("    --limit <n>            Max results (default 20)")
+	fmt.Println("    --offset <n>           Result offset")
+	fmt.Println("    --status <s>           Status filter: open, *, or numeric ID (default open)")
+	fmt.Println("    --min-matches <n>      Min word matches (default 1)")
+	fmt.Println("    --exhaustive           Search all words even if limit reached early")
 	fmt.Println("  issue show <id>       Show issue details (JSON output by default)")
 	fmt.Println("  issue comment <id>    Add comment to issue")
 	fmt.Println("    --text <text>         Comment text (required)")
@@ -442,6 +742,8 @@ func printHelp() {
 	fmt.Println("  110  Internal error")
 	fmt.Println()
 	fmt.Println("Examples:")
+	fmt.Println("  easyredmine-cli issue search \"correction statut message\"")
+	fmt.Println("  easyredmine-cli issue search \"correction statut\" --limit 50")
 	fmt.Println("  easyredmine-cli issue show 61809")
 	fmt.Println("  easyredmine-cli issue show 61809 --human")
 	fmt.Println("  easyredmine-cli issue comment 61809 --text \"Looks good\"")

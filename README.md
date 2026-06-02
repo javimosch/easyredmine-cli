@@ -30,8 +30,25 @@ easyredmine-cli issue show 61809
 easyredmine-cli issue comment 61809 --text "Message"
 easyredmine-cli issue edit 61809 --description "<p>New desc</p>"
 
+# Smart search (word-by-word, dedup, rank by match)
+easyredmine-cli issue search "correction statut message"
+easyredmine-cli issue search "correction statut" --limit 50 --human
+
 # Human-readable
 easyredmine-cli issue show 61809 --human
+```
+
+## Smart search
+
+EasyRedmine's API doesn't support full-text search. `easyredmine-cli` works around this by:
+1. Fetching all open issues concurrently (parallel page requests)
+2. Breaking your query into individual words
+3. Matching each word against issue subjects
+4. Ranking results by number of word matches (issues matching more words rank first)
+5. Deduplicating and sorting by match count + recency
+
+```bash
+easyredmine-cli issue search "phrase with multiple words"
 ```
 
 ## Exit codes
