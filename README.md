@@ -1,32 +1,50 @@
 # easyredmine-cli
 easyredmine-cli — Redmine API client for EasyRedmine. Read issues, post comments, edit descriptions.
 
+Agent-friendly: JSON output by default, `--human` for humans, `EASYREDMINE_API_KEY` env var auth, semantic exit codes.
+
 Part of [supercli](https://github.com/javimosch/supercli) ecosystem.
 
 ```bash
 # Build from source (requires Go 1.22+)
-cd ~/ai/easyredmine-cli
 go build -ldflags="-s -w" -o easyredmine-cli main.go
 sudo mv easyredmine-cli /usr/local/bin/
 ```
 
-## Configuration
+## Quick start
 
 ```bash
-easyredmine-cli config set
-```
+# Via env var (no config file needed)
+export EASYREDMINE_API_KEY=your-key
+easyredmine-cli issue show 61809
 
-Token stored in `~/.config/easyredmine-cli/config.json`.
+# Or via config
+easyredmine-cli config set --api-key your-key
+```
 
 ## Usage
 
 ```bash
+# JSON output (default)
 easyredmine-cli issue show 61809
-easyredmine-cli issue show 61809 --json
+easyredmine-cli issue comment 61809 --text "Message"
+easyredmine-cli issue edit 61809 --description "<p>New desc</p>"
 
-easyredmine-cli issue comment 61809 --text "Looks good to me"
-easyredmine-cli issue edit 61809 --description "<p>Updated</p>"
+# Human-readable
+easyredmine-cli issue show 61809 --human
 ```
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0    | Success |
+| 85   | Invalid argument / config error |
+| 92   | Resource not found |
+| 105  | Integration / API error |
+| 110  | Internal error |
+
+Errors on stderr as structured JSON.
 
 ---
 
