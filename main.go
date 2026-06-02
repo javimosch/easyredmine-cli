@@ -238,9 +238,12 @@ func tokenize(query string) []string {
 	return words
 }
 
-func fetchIssuePage(cfg Config, status string, offset, limit int) ([]IssueListItem, error) {
+func fetchIssuePage(cfg Config, status, updatedOn string, offset, limit int) ([]IssueListItem, error) {
 	url := fmt.Sprintf("%s/issues.json?status_id=%s&limit=%d&offset=%d&sort=id:asc",
 		strings.TrimRight(cfg.BaseURL, "/"), status, limit, offset)
+	if updatedOn != "" {
+		url += fmt.Sprintf("&updated_on=>=%s", updatedOn)
+	}
 	body := doRequest(cfg, "GET", url, nil)
 
 	var resp IssueListResponse
@@ -272,8 +275,22 @@ func handleIssueSearch(args []string) {
 	limit := fs.Int("limit", 20, "Max results (default 20)")
 	offset := fs.Int("offset", 0, "Result offset")
 	status := fs.String("status", "open", "Status filter: open, *, or numeric ID")
+	currentMonth := fs.Bool("current-month", false, "Only issues updated in current month")
+	currentYear := fs.Bool("current-year", false, "Only issues updated in current year")
+	after := fs.String("after", "", "Only issues updated after date (YYYY-MM-DD)")
 	minMatches := fs.Int("min-matches", 1, "Minimum word matches to include")
 	fs.Parse(remaining)
+
+	// Build updated_on filter (API-side)
+	now := time.Now()
+	var updatedOnFilter string
+	if *currentMonth {
+		updatedOnFilter = fmt.Sprintf("%d-%02d-01", now.Year(), now.Month())
+	} else if *currentYear {
+		updatedOnFilter = fmt.Sprintf("%d-01-01", now.Year())
+	} else if *after != "" {
+		updatedOnFilter = *after
+	}
 
 	words := tokenize(query)
 	if len(words) == 0 {
@@ -284,6 +301,9 @@ func handleIssueSearch(args []string) {
 
 	// Step 1: count total open issues
 	countURL := fmt.Sprintf("%s/issues.json?status_id=%s&limit=1", strings.TrimRight(cfg.BaseURL, "/"), *status)
+	if updatedOnFilter != "" {
+		countURL += fmt.Sprintf("&updated_on=>=%s", updatedOnFilter)
+	}
 	countBody := doRequest(cfg, "GET", countURL, nil)
 	var countResp IssueListResponse
 	if err := json.Unmarshal(countBody, &countResp); err != nil {
@@ -322,7 +342,7 @@ func handleIssueSearch(args []string) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			off := page * pageSize
-			issues, err := fetchIssuePage(cfg, *status, off, pageSize)
+			issues, err := fetchIssuePage(cfg, *status, updatedOnFilter, off, pageSize)
 			if err != nil {
 				ch <- pageResult{err: err}
 				return
@@ -713,8 +733,10 @@ func printHelp() {
 	fmt.Println("    --limit <n>            Max results (default 20)")
 	fmt.Println("    --offset <n>           Result offset")
 	fmt.Println("    --status <s>           Status filter: open, *, or numeric ID (default open)")
+	fmt.Println("    --current-month        Only issues updated this month (API-side filter)")
+	fmt.Println("    --current-year         Only issues updated this year (API-side filter)")
+	fmt.Println("    --after <date>         Only issues updated after YYYY-MM-DD (API-side filter)")
 	fmt.Println("    --min-matches <n>      Min word matches (default 1)")
-	fmt.Println("    --exhaustive           Search all words even if limit reached early")
 	fmt.Println("  issue show <id>       Show issue details (JSON output by default)")
 	fmt.Println("  issue comment <id>    Add comment to issue")
 	fmt.Println("    --text <text>         Comment text (required)")
@@ -744,6 +766,9 @@ func printHelp() {
 	fmt.Println("Examples:")
 	fmt.Println("  easyredmine-cli issue search \"correction statut message\"")
 	fmt.Println("  easyredmine-cli issue search \"correction statut\" --limit 50")
+	fmt.Println("  easyredmine-cli issue search \"correction\" --current-month   # fast: 1 page")
+	fmt.Println("  easyredmine-cli issue search \"correction\" --current-year    # ~8 pages")
+	fmt.Println("  easyredmine-cli issue search \"correction\" --after 2026-05-01 # custom date")
 	fmt.Println("  easyredmine-cli issue show 61809")
 	fmt.Println("  easyredmine-cli issue show 61809 --human")
 	fmt.Println("  easyredmine-cli issue comment 61809 --text \"Looks good\"")
