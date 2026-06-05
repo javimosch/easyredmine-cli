@@ -173,6 +173,8 @@ func main() {
 		handleUser(os.Args[2:])
 	case "config":
 		handleConfig(os.Args[2:])
+	case "update":
+		handleUpdate(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("easyredmine-cli v%s\n", Version)
 	case "help", "--help", "-h":
@@ -765,6 +767,174 @@ func handleUserSearch(args []string) {
 		}
 	} else {
 		outputJSON(result)
+	}
+}
+
+// --- update ---
+
+type GitHubRelease struct {
+	TagName string `json:"tag_name"`
+	Name    string `json:"name"`
+	Assets  []struct {
+		Name        string `json:"name"`
+		DownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
+}
+
+func handleUpdate(args []string) {
+	// Strip global --human/-H before processing
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != "--human" && a != "-H" {
+			filtered = append(filtered, a)
+		}
+	}
+	args = filtered
+
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	checkOnly := fs.Bool("check-only", false, "Only check for updates, don't install")
+	fs.Parse(args)
+
+	// Fetch latest release from GitHub
+	url := "https://api.github.com/repos/javimosch/easyredmine-cli/releases/latest"
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Error creating request: %v", err), false, nil)
+	}
+	req.Header.Set("User-Agent", "easyredmine-cli")
+	
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		exitErr(105, "integration_error", fmt.Sprintf("Failed to fetch release info: %v", err), true, nil)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != 200 {
+		if resp.StatusCode == 404 {
+			exitErr(92, "resource_not_found", "No releases found on GitHub. This is a new repository - releases will be available after the first official release.", false, []string{"To update manually: cd ~/ai/easyredmine-cli && go build -ldflags=\"-s -w\" -o easyredmine-cli main.go && cp easyredmine-cli ~/.local/bin/"})
+		}
+		exitErr(105, "integration_error", fmt.Sprintf("GitHub API returned status %d", resp.StatusCode), true, nil)
+	}
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Error reading response: %v", err), false, nil)
+	}
+	
+	var release GitHubRelease
+	if err := json.Unmarshal(body, &release); err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Error parsing release info: %v", err), false, nil)
+	}
+	
+	// Parse version from tag (remove 'v' prefix if present)
+	latestVersion := strings.TrimPrefix(release.TagName, "v")
+	currentVersion := Version
+	
+	if human() {
+		fmt.Printf("Current version: %s\n", currentVersion)
+		fmt.Printf("Latest version:  %s\n", latestVersion)
+	}
+	
+	// Compare versions (simple string comparison for now)
+	if latestVersion == currentVersion {
+		if human() {
+			fmt.Println("Already up to date!")
+		} else {
+			outputJSON(map[string]any{"ok": true, "current": currentVersion, "latest": latestVersion, "action": "no_update_needed"})
+		}
+		return
+	}
+
+	if *checkOnly {
+		if human() {
+			fmt.Printf("Update available: %s → %s\n", currentVersion, latestVersion)
+			fmt.Println("Use --check-only=false to install the update.")
+		} else {
+			outputJSON(map[string]any{"ok": true, "current": currentVersion, "latest": latestVersion, "action": "update_available", "check_only": true})
+		}
+		return
+	}
+	
+	if human() {
+		fmt.Printf("Update available: %s → %s\n", currentVersion, latestVersion)
+		fmt.Println("Downloading...")
+	} else {
+		outputJSON(map[string]any{"ok": true, "current": currentVersion, "latest": latestVersion, "action": "downloading"})
+	}
+	
+	// Find the Linux binary asset
+	var downloadURL string
+	for _, asset := range release.Assets {
+		if strings.Contains(asset.Name, "linux") && !strings.Contains(asset.Name, ".md5") && !strings.Contains(asset.Name, ".sha256") {
+			downloadURL = asset.DownloadURL
+			break
+		}
+	}
+	
+	if downloadURL == "" {
+		exitErr(105, "integration_error", "No Linux binary found in release assets", true, nil)
+	}
+	
+	// Download to /tmp
+	tmpPath := "/tmp/easyredmine-cli-update"
+	resp, err = http.Get(downloadURL)
+	if err != nil {
+		exitErr(105, "integration_error", fmt.Sprintf("Failed to download binary: %v", err), true, nil)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != 200 {
+		exitErr(105, "integration_error", fmt.Sprintf("Download failed with status %d", resp.StatusCode), true, nil)
+	}
+	
+	tmpFile, err := os.Create(tmpPath)
+	if err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Failed to create temp file: %v", err), false, nil)
+	}
+	defer tmpFile.Close()
+	
+	_, err = io.Copy(tmpFile, resp.Body)
+	if err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Failed to write binary: %v", err), false, nil)
+	}
+	
+	// Make it executable
+	if err := os.Chmod(tmpPath, 0755); err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Failed to make binary executable: %v", err), false, nil)
+	}
+	
+	// Determine install path
+	installPath := "/usr/local/bin/easyredmine-cli"
+	home, err := os.UserHomeDir()
+	if err == nil {
+		localBin := filepath.Join(home, ".local", "bin", "easyredmine-cli")
+		if _, err := os.Stat(localBin); err == nil {
+			installPath = localBin
+		}
+	}
+	
+	if human() {
+		fmt.Printf("Installing to: %s\n", installPath)
+	}
+	
+	// Replace the binary
+	if err := os.Rename(tmpPath, installPath); err != nil {
+		// Try copy if rename fails (different filesystems)
+		data, err := os.ReadFile(tmpPath)
+		if err != nil {
+			exitErr(110, "internal_error", fmt.Sprintf("Failed to read downloaded binary: %v", err), false, nil)
+		}
+		if err := os.WriteFile(installPath, data, 0755); err != nil {
+			exitErr(110, "internal_error", fmt.Sprintf("Failed to install binary: %v", err), false, nil)
+		}
+		os.Remove(tmpPath)
+	}
+	
+	if human() {
+		fmt.Printf("Successfully updated to %s\n", latestVersion)
+	} else {
+		outputJSON(map[string]any{"ok": true, "current": currentVersion, "latest": latestVersion, "action": "updated", "install_path": installPath})
 	}
 }
 
