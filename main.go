@@ -32,6 +32,7 @@ type Issue struct {
 	Status      IDName    `json:"status"`
 	Priority    IDName    `json:"priority"`
 	Author      IDName    `json:"author"`
+	AssignedTo  IDName    `json:"assigned_to"`
 	Subject     string    `json:"subject"`
 	Description string    `json:"description"`
 	CreatedOn   string    `json:"created_on"`
@@ -56,9 +57,10 @@ type UpdateRequest struct {
 }
 
 type UpdateIssue struct {
-	Notes       string `json:"notes,omitempty"`
-	Description string `json:"description,omitempty"`
-	StatusID    int    `json:"status_id,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+	Description  string `json:"description,omitempty"`
+	StatusID     int    `json:"status_id,omitempty"`
+	AssignedToID int    `json:"assigned_to_id,omitempty"`
 }
 
 type ErrorBody struct {
@@ -180,7 +182,7 @@ func handleIssue(args []string) {
 
 	if len(args) < 1 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(os.Stderr, "Usage: easyredmine-cli issue <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "Subcommands: search, show, comment, edit, status")
+		fmt.Fprintln(os.Stderr, "Subcommands: search, show, comment, edit, status, assign")
 		os.Exit(85)
 	}
 
@@ -196,6 +198,8 @@ func handleIssue(args []string) {
 		handleIssueEdit(args[1:])
 	case "status":
 		handleIssueStatus(args[1:])
+	case "assign":
+		handleIssueAssign(args[1:])
 	default:
 		exitErr(85, "invalid_argument", fmt.Sprintf("Unknown issue subcommand: %s", sub), false, []string{"Run: easyredmine-cli help"})
 	}
@@ -487,11 +491,15 @@ func handleIssueShow(args []string) {
 
 	if human() {
 		fmt.Printf("Issue #%d\n", issue.Issue.ID)
-		fmt.Printf("Subject:   %s\n", issue.Issue.Subject)
-		fmt.Printf("Project:   %s\n", issue.Issue.Project.Name)
-		fmt.Printf("Status:    %s\n", issue.Issue.Status.Name)
-		fmt.Printf("Priority:  %s\n", issue.Issue.Priority.Name)
-		fmt.Printf("Updated:   %s\n", issue.Issue.UpdatedOn)
+		fmt.Printf("Subject:     %s\n", issue.Issue.Subject)
+		fmt.Printf("Project:     %s\n", issue.Issue.Project.Name)
+		fmt.Printf("Status:      %s\n", issue.Issue.Status.Name)
+		fmt.Printf("Priority:    %s\n", issue.Issue.Priority.Name)
+		fmt.Printf("Author:      %s\n", issue.Issue.Author.Name)
+		if issue.Issue.AssignedTo.ID != 0 {
+			fmt.Printf("Assigned to: %s\n", issue.Issue.AssignedTo.Name)
+		}
+		fmt.Printf("Updated:     %s\n", issue.Issue.UpdatedOn)
 		fmt.Printf("\nDescription:\n%s\n", issue.Issue.Description)
 		for _, j := range issue.Issue.Journals {
 			if strings.TrimSpace(j.Notes) == "" {
@@ -564,6 +572,27 @@ func handleIssueStatus(args []string) {
 		fmt.Printf("Issue #%s status updated to ID %d\n", id, *statusID)
 	} else {
 		outputJSON(map[string]any{"ok": true, "issue_id": id, "action": "status_change", "status_id": *statusID})
+	}
+}
+
+func handleIssueAssign(args []string) {
+	id, remaining := extractPositional(args)
+	fs := flag.NewFlagSet("assign", flag.ExitOnError)
+	assignedToID := fs.Int("assigned-to-id", 0, "Assigned user ID")
+	fs.Parse(remaining)
+
+	if id == "" || *assignedToID == 0 {
+		exitErr(85, "invalid_argument", "Usage: easyredmine-cli issue assign <id> --assigned-to-id <user_id>", false, nil)
+	}
+	cfg := resolveConfig()
+
+	req := UpdateRequest{Issue: UpdateIssue{AssignedToID: *assignedToID}}
+	updateIssue(cfg, id, req)
+
+	if human() {
+		fmt.Printf("Issue #%s assigned to user ID %d\n", id, *assignedToID)
+	} else {
+		outputJSON(map[string]any{"ok": true, "issue_id": id, "action": "assign", "assigned_to_id": *assignedToID})
 	}
 }
 
