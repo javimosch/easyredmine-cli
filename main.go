@@ -812,9 +812,7 @@ func handleUpdate(args []string) {
 	
 	if resp.StatusCode != 200 {
 		if resp.StatusCode == 404 {
-			// Get current working directory for manual update instructions
-			cwd, _ := os.Getwd()
-			exitErr(92, "resource_not_found", "No releases found on GitHub. This is a new repository - releases will be available after the first official release.", false, []string{"To update manually: cd " + cwd + " && go build -ldflags=\"-s -w\" -o easyredmine-cli main.go && cp easyredmine-cli ~/.local/bin/"})
+			exitErr(92, "resource_not_found", "No releases found on GitHub. This is a new repository - releases will be available after the first official release.", false, []string{"To update manually: Clone the repository, build with 'go build -ldflags=\"-s -w\" -o easyredmine-cli main.go', and copy to your PATH"})
 		}
 		exitErr(105, "integration_error", fmt.Sprintf("GitHub API returned status %d", resp.StatusCode), true, nil)
 	}
