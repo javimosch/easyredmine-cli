@@ -113,6 +113,51 @@ type SearchHit struct {
 	UpdatedOn    string   `json:"updated_on"`
 }
 
+type UserListResponse struct {
+	Users     []User `json:"users"`
+	TotalCount int   `json:"total_count"`
+	Offset     int   `json:"offset"`
+	Limit      int   `json:"limit"`
+}
+
+type User struct {
+	ID       int    `json:"id"`
+	Login    string `json:"login"`
+	Firstname string `json:"firstname"`
+	Lastname  string `json:"lastname"`
+	Mail      string `json:"mail"`
+	CreatedOn string `json:"created_on"`
+}
+
+type MembershipListResponse struct {
+	Memberships []Membership `json:"memberships"`
+	TotalCount  int          `json:"total_count"`
+	Offset      int          `json:"offset"`
+	Limit       int          `json:"limit"`
+}
+
+type Membership struct {
+	ID      int         `json:"id"`
+	Project IDName      `json:"project"`
+	User    IDName      `json:"user"`
+	Group   IDName      `json:"group"`
+	Roles   []IDName    `json:"roles"`
+}
+
+type UserSearchResult struct {
+	Results  []UserHit `json:"results"`
+	Total    int       `json:"total"`
+	Returned int       `json:"returned"`
+	Query    string    `json:"query"`
+}
+
+type UserHit struct {
+	ID       int    `json:"id"`
+	Login    string `json:"login"`
+	Fullname string `json:"fullname"`
+	Mail     string `json:"mail"`
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printHelp()
@@ -124,6 +169,8 @@ func main() {
 	switch command {
 	case "issue":
 		handleIssue(os.Args[2:])
+	case "user":
+		handleUser(os.Args[2:])
 	case "config":
 		handleConfig(os.Args[2:])
 	case "version", "--version", "-v":
@@ -593,6 +640,131 @@ func handleIssueAssign(args []string) {
 		fmt.Printf("Issue #%s assigned to user ID %d\n", id, *assignedToID)
 	} else {
 		outputJSON(map[string]any{"ok": true, "issue_id": id, "action": "assign", "assigned_to_id": *assignedToID})
+	}
+}
+
+// --- user ---
+
+func handleUser(args []string) {
+	// Strip global --human/-H before subcommand dispatch
+	filtered := make([]string, 0, len(args))
+	for _, a := range args {
+		if a != "--human" && a != "-H" {
+			filtered = append(filtered, a)
+		}
+	}
+	args = filtered
+
+	if len(args) < 1 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintln(os.Stderr, "Usage: easyredmine-cli user <subcommand> [options]")
+		fmt.Fprintln(os.Stderr, "Subcommands: search")
+		os.Exit(85)
+	}
+
+	sub := args[0]
+	switch sub {
+	case "search":
+		handleUserSearch(args[1:])
+	default:
+		exitErr(85, "invalid_argument", fmt.Sprintf("Unknown user subcommand: %s", sub), false, []string{"Run: easyredmine-cli help"})
+	}
+}
+
+func handleUserSearch(args []string) {
+	query, remaining := extractPositional(args)
+	if query == "" {
+		exitErr(85, "invalid_argument", "Usage: easyredmine-cli user search \"<name>\" --project-id <id>", false, nil)
+	}
+
+	fs := flag.NewFlagSet("user-search", flag.ExitOnError)
+	projectID := fs.Int("project-id", 0, "Project ID (required)")
+	limit := fs.Int("limit", 20, "Max results (default 20)")
+	fs.Parse(remaining)
+
+	if *projectID == 0 {
+		exitErr(85, "invalid_argument", "Project ID is required. Use --project-id <id>", false, nil)
+	}
+
+	cfg := resolveConfig()
+
+	// Fetch project memberships
+	url := fmt.Sprintf("%s/projects/%d/memberships.json?limit=100", strings.TrimRight(cfg.BaseURL, "/"), *projectID)
+	body := doRequest(cfg, "GET", url, nil)
+
+	var resp MembershipListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		exitErr(110, "internal_error", fmt.Sprintf("Error parsing membership list: %v", err), false, nil)
+	}
+
+	// Search for matching users (case-insensitive)
+	queryLower := strings.ToLower(query)
+	var hits []UserHit
+	for _, membership := range resp.Memberships {
+		// Check users
+		if membership.User.ID != 0 && strings.Contains(strings.ToLower(membership.User.Name), queryLower) {
+			hits = append(hits, UserHit{
+				ID:       membership.User.ID,
+				Login:    membership.User.Name,
+				Fullname: membership.User.Name,
+				Mail:     "",
+			})
+		}
+		// Check groups
+		if membership.Group.ID != 0 && strings.Contains(strings.ToLower(membership.Group.Name), queryLower) {
+			hits = append(hits, UserHit{
+				ID:       membership.Group.ID,
+				Login:    membership.Group.Name,
+				Fullname: membership.Group.Name + " (Group)",
+				Mail:     "",
+			})
+		}
+		// Check roles
+		for _, role := range membership.Roles {
+			if strings.Contains(strings.ToLower(role.Name), queryLower) {
+				// Add the user/group with this role
+				if membership.User.ID != 0 {
+					hits = append(hits, UserHit{
+						ID:       membership.User.ID,
+						Login:    membership.User.Name,
+						Fullname: membership.User.Name + " (" + role.Name + ")",
+						Mail:     "",
+					})
+				} else if membership.Group.ID != 0 {
+					hits = append(hits, UserHit{
+						ID:       membership.Group.ID,
+						Login:    membership.Group.Name,
+						Fullname: membership.Group.Name + " (Group, " + role.Name + ")",
+						Mail:     "",
+					})
+				}
+			}
+		}
+	}
+
+	// Limit results
+	if len(hits) > *limit {
+		hits = hits[:*limit]
+	}
+
+	result := UserSearchResult{
+		Results:  hits,
+		Total:    len(hits),
+		Returned: len(hits),
+		Query:    query,
+	}
+
+	if human() {
+		if len(result.Results) == 0 {
+			fmt.Println("No users found")
+			return
+		}
+		fmt.Printf("Query: %s (Project ID: %d)\n", result.Query, *projectID)
+		fmt.Printf("Results: %d\n\n", result.Returned)
+		for _, h := range result.Results {
+			fmt.Printf("  ID: %d | Name: %s\n", h.ID, h.Fullname)
+		}
+	} else {
+		outputJSON(result)
 	}
 }
 
