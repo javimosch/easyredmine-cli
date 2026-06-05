@@ -20,7 +20,7 @@ sudo mv easyredmine-cli /usr/local/bin/
 Verify:
 ```bash
 easyredmine-cli version
-# → easyredmine-cli v1.0.2
+# → easyredmine-cli v1.0.3
 ```
 
 ## Authentication
