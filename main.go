@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const Version = "1.0.2"
+const Version = "1.0.3"
 const ConfigDir = ".config/easyredmine-cli"
 const ConfigFile = "config.json"
 
@@ -1137,6 +1137,14 @@ func printHelp() {
 	fmt.Println("    --text <text>         Comment text (required)")
 	fmt.Println("  issue edit <id>       Edit issue fields")
 	fmt.Println("    --description <t>     New description (required)")
+	fmt.Println("  issue status <id>     Change issue status")
+	fmt.Println("    --status-id <n>       Status ID (required)")
+	fmt.Println("  issue assign <id>     Assign issue to user/group")
+	fmt.Println("    --assigned-to-id <n>  User/Group ID (required)")
+	fmt.Println("  user search <query>    Search users/groups/roles in project")
+	fmt.Println("    --project-id <n>      Project ID (required)")
+	fmt.Println("  update                 Check for updates from GitHub")
+	fmt.Println("    --check-only          Only check, don't install")
 	fmt.Println("  config                 Show current config")
 	fmt.Println("  config set             Set API key and base URL")
 	fmt.Println("    --api-key <key>        EasyRedmine API key (or EASYREDMINE_API_KEY env)")
@@ -1168,6 +1176,10 @@ func printHelp() {
 	fmt.Println("  easyredmine-cli issue show 61809 --human")
 	fmt.Println("  easyredmine-cli issue comment 61809 --text \"Looks good\"")
 	fmt.Println("  easyredmine-cli issue edit 61809 --description \"<p>Updated</p>\"")
+	fmt.Println("  easyredmine-cli issue status 61809 --status-id 51")
+	fmt.Println("  easyredmine-cli issue assign 61809 --assigned-to-id 199")
+	fmt.Println("  easyredmine-cli user search \"QA\" --project-id 1111")
+	fmt.Println("  easyredmine-cli update --check-only")
 	fmt.Println("  easyredmine-cli config set --api-key <key>")
 	fmt.Println("  EASYREDMINE_API_KEY=<key> easyredmine-cli issue show 61809")
 }
