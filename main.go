@@ -58,6 +58,7 @@ type UpdateRequest struct {
 type UpdateIssue struct {
 	Notes       string `json:"notes,omitempty"`
 	Description string `json:"description,omitempty"`
+	StatusID    int    `json:"status_id,omitempty"`
 }
 
 type ErrorBody struct {
@@ -179,7 +180,7 @@ func handleIssue(args []string) {
 
 	if len(args) < 1 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(os.Stderr, "Usage: easyredmine-cli issue <subcommand> [options]")
-		fmt.Fprintln(os.Stderr, "Subcommands: search, show, comment, edit")
+		fmt.Fprintln(os.Stderr, "Subcommands: search, show, comment, edit, status")
 		os.Exit(85)
 	}
 
@@ -193,6 +194,8 @@ func handleIssue(args []string) {
 		handleIssueComment(args[1:])
 	case "edit":
 		handleIssueEdit(args[1:])
+	case "status":
+		handleIssueStatus(args[1:])
 	default:
 		exitErr(85, "invalid_argument", fmt.Sprintf("Unknown issue subcommand: %s", sub), false, []string{"Run: easyredmine-cli help"})
 	}
@@ -540,6 +543,27 @@ func handleIssueEdit(args []string) {
 		fmt.Printf("Issue #%s description updated\n", id)
 	} else {
 		outputJSON(map[string]any{"ok": true, "issue_id": id, "action": "edit_description"})
+	}
+}
+
+func handleIssueStatus(args []string) {
+	id, remaining := extractPositional(args)
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	statusID := fs.Int("status-id", 0, "Status ID")
+	fs.Parse(remaining)
+
+	if id == "" || *statusID == 0 {
+		exitErr(85, "invalid_argument", "Usage: easyredmine-cli issue status <id> --status-id <status_id>", false, nil)
+	}
+	cfg := resolveConfig()
+
+	req := UpdateRequest{Issue: UpdateIssue{StatusID: *statusID}}
+	updateIssue(cfg, id, req)
+
+	if human() {
+		fmt.Printf("Issue #%s status updated to ID %d\n", id, *statusID)
+	} else {
+		outputJSON(map[string]any{"ok": true, "issue_id": id, "action": "status_change", "status_id": *statusID})
 	}
 }
 
