@@ -1,6 +1,6 @@
 ---
 name: easyredmine-cli
-description: Use easyredmine-cli for Redmine API operations on EasyRedmine (Simpliciti). Read issues, post comments, edit descriptions, and smart-search across all open issues. JSON output by default, EASYREDMINE_API_KEY env var for auth, semantic exit codes.
+description: Use easyredmine-cli for Redmine API operations on EasyRedmine (Simpliciti). Read issues, post comments, edit descriptions, change status, assign users, search project members, and smart-search across all open issues. JSON output by default, EASYREDMINE_API_KEY env var for auth, semantic exit codes.
 ---
 
 # easyredmine-cli
@@ -20,7 +20,7 @@ sudo mv easyredmine-cli /usr/local/bin/
 Verify:
 ```bash
 easyredmine-cli version
-# → easyredmine-cli v1.0.0
+# → easyredmine-cli v1.0.2
 ```
 
 ## Authentication
@@ -84,6 +84,57 @@ Replace an issue's description.
 ```bash
 easyredmine-cli issue edit 61809 --description "<p>Updated description</p>"
 ```
+
+### `issue status <id> --status-id <status_id>`
+
+Change issue status.
+
+```bash
+easyredmine-cli issue status 61809 --status-id 51
+# → {"ok":true,"issue_id":"61809","action":"status_change","status_id":51}
+```
+
+### `issue assign <id> --assigned-to-id <user_id>`
+
+Assign issue to a user or group.
+
+```bash
+easyredmine-cli issue assign 61809 --assigned-to-id 199
+# → {"ok":true,"issue_id":"61809","action":"assign","assigned_to_id":199}
+```
+
+### `user search "<query>" --project-id <id>`
+
+Search users, groups, and roles within a project for assignment.
+
+```bash
+easyredmine-cli user search "QA" --project-id 1111
+# → {"results":[{"id":46,"fullname":"Equipe QA Env (Group)"}],"total":1,"returned":1,"query":"QA"}
+```
+
+**Agent workflow**: When asked to "Assign to QA", search first to get the ID, then assign:
+```bash
+# 1. Find QA team ID
+easyredmine-cli user search "QA" --project-id 1111
+# → {"results":[{"id":46,"fullname":"Equipe QA Env (Group)"},...]}
+
+# 2. Assign using the ID
+easyredmine-cli issue assign 62507 --assigned-to-id 46
+```
+
+### `update [--check-only]`
+
+Check for updates from GitHub releases and optionally auto-update.
+
+```bash
+# Check for updates only
+easyredmine-cli update --check-only
+
+# Check and install if update available
+easyredmine-cli update
+```
+
+**Note**: If no GitHub releases exist yet, the command provides manual update instructions.
 
 ### `issue search "<phrase>"` — smart search
 
