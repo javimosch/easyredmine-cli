@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const Version = "1.0.0"
+const Version = "1.0.1"
 const ConfigDir = ".config/easyredmine-cli"
 const ConfigFile = "config.json"
 
@@ -812,7 +812,9 @@ func handleUpdate(args []string) {
 	
 	if resp.StatusCode != 200 {
 		if resp.StatusCode == 404 {
-			exitErr(92, "resource_not_found", "No releases found on GitHub. This is a new repository - releases will be available after the first official release.", false, []string{"To update manually: cd ~/ai/easyredmine-cli && go build -ldflags=\"-s -w\" -o easyredmine-cli main.go && cp easyredmine-cli ~/.local/bin/"})
+			// Get current working directory for manual update instructions
+			cwd, _ := os.Getwd()
+			exitErr(92, "resource_not_found", "No releases found on GitHub. This is a new repository - releases will be available after the first official release.", false, []string{"To update manually: cd " + cwd + " && go build -ldflags=\"-s -w\" -o easyredmine-cli main.go && cp easyredmine-cli ~/.local/bin/"})
 		}
 		exitErr(105, "integration_error", fmt.Sprintf("GitHub API returned status %d", resp.StatusCode), true, nil)
 	}
