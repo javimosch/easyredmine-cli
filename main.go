@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const Version = "1.0.3"
+const Version = "1.0.4"
 const ConfigDir = ".config/easyredmine-cli"
 const ConfigFile = "config.json"
 
@@ -33,6 +33,7 @@ type Issue struct {
 	Priority    IDName    `json:"priority"`
 	Author      IDName    `json:"author"`
 	AssignedTo  IDName    `json:"assigned_to"`
+	DoneRatio   int       `json:"done_ratio"`
 	Subject     string    `json:"subject"`
 	Description string    `json:"description"`
 	CreatedOn   string    `json:"created_on"`
@@ -61,6 +62,8 @@ type UpdateIssue struct {
 	Description  string `json:"description,omitempty"`
 	StatusID     int    `json:"status_id,omitempty"`
 	AssignedToID int    `json:"assigned_to_id,omitempty"`
+	// Pointer: 0 is a real value (reset to 0%), so omitempty on an int would drop it.
+	DoneRatio *int `json:"done_ratio,omitempty"`
 }
 
 type ErrorBody struct {
@@ -548,6 +551,7 @@ func handleIssueShow(args []string) {
 		if issue.Issue.AssignedTo.ID != 0 {
 			fmt.Printf("Assigned to: %s\n", issue.Issue.AssignedTo.Name)
 		}
+		fmt.Printf("Done:        %d%%\n", issue.Issue.DoneRatio)
 		fmt.Printf("Updated:     %s\n", issue.Issue.UpdatedOn)
 		fmt.Printf("\nDescription:\n%s\n", issue.Issue.Description)
 		for _, j := range issue.Issue.Journals {
@@ -586,20 +590,40 @@ func handleIssueEdit(args []string) {
 	id, remaining := extractPositional(args)
 	fs := flag.NewFlagSet("edit", flag.ExitOnError)
 	desc := fs.String("description", "", "New description text")
+	done := fs.Int("done-ratio", -1, "Percent done, 0-100")
 	fs.Parse(remaining)
 
-	if id == "" || *desc == "" {
-		exitErr(85, "invalid_argument", "Usage: easyredmine-cli issue edit <id> --description \"<text>\"", false, nil)
+	if id == "" || (*desc == "" && *done < 0) {
+		exitErr(85, "invalid_argument", "Usage: easyredmine-cli issue edit <id> [--description \"<text>\"] [--done-ratio <0-100>]", false,
+			[]string{"Pass at least one of --description or --done-ratio"})
 	}
+	ratio := doneRatioArg(*done)
 	cfg := resolveConfig()
 
-	req := UpdateRequest{Issue: UpdateIssue{Description: *desc}}
+	req := UpdateRequest{Issue: UpdateIssue{Description: *desc, DoneRatio: ratio}}
 	updateIssue(cfg, id, req)
 
+	// "edit_description" is kept for description-only edits (existing callers match on it).
+	action := "edit_description"
+	if ratio != nil {
+		action = "edit"
+	}
+	out := map[string]any{"ok": true, "issue_id": id, "action": action}
+	if *desc != "" && ratio != nil {
+		out["description_updated"] = true
+	}
+	if ratio != nil {
+		out["done_ratio"] = verifyDoneRatio(cfg, id, *ratio)
+	}
 	if human() {
-		fmt.Printf("Issue #%s description updated\n", id)
+		if *desc != "" {
+			fmt.Printf("Issue #%s description updated\n", id)
+		}
+		if ratio != nil {
+			fmt.Printf("Issue #%s done ratio set to %d%%\n", id, *ratio)
+		}
 	} else {
-		outputJSON(map[string]any{"ok": true, "issue_id": id, "action": "edit_description"})
+		outputJSON(out)
 	}
 }
 
@@ -607,21 +631,55 @@ func handleIssueStatus(args []string) {
 	id, remaining := extractPositional(args)
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	statusID := fs.Int("status-id", 0, "Status ID")
+	done := fs.Int("done-ratio", -1, "Percent done, 0-100 (set in the same update)")
 	fs.Parse(remaining)
 
 	if id == "" || *statusID == 0 {
-		exitErr(85, "invalid_argument", "Usage: easyredmine-cli issue status <id> --status-id <status_id>", false, nil)
+		exitErr(85, "invalid_argument", "Usage: easyredmine-cli issue status <id> --status-id <status_id> [--done-ratio <0-100>]", false, nil)
 	}
+	ratio := doneRatioArg(*done)
 	cfg := resolveConfig()
 
-	req := UpdateRequest{Issue: UpdateIssue{StatusID: *statusID}}
+	req := UpdateRequest{Issue: UpdateIssue{StatusID: *statusID, DoneRatio: ratio}}
 	updateIssue(cfg, id, req)
 
+	out := map[string]any{"ok": true, "issue_id": id, "action": "status_change", "status_id": *statusID}
+	if ratio != nil {
+		out["done_ratio"] = verifyDoneRatio(cfg, id, *ratio)
+	}
 	if human() {
 		fmt.Printf("Issue #%s status updated to ID %d\n", id, *statusID)
+		if ratio != nil {
+			fmt.Printf("Issue #%s done ratio set to %d%%\n", id, *ratio)
+		}
 	} else {
-		outputJSON(map[string]any{"ok": true, "issue_id": id, "action": "status_change", "status_id": *statusID})
+		outputJSON(out)
 	}
+}
+
+// doneRatioArg turns the --done-ratio flag (-1 = not given) into the request field.
+func doneRatioArg(v int) *int {
+	if v == -1 {
+		return nil
+	}
+	if v < 0 || v > 100 {
+		exitErr(85, "invalid_argument", fmt.Sprintf("--done-ratio must be 0-100, got %d", v), false, nil)
+	}
+	return &v
+}
+
+// verifyDoneRatio re-reads the issue: Redmine answers a PUT with success even
+// when it ignores done_ratio (e.g. % done derived from the status), so the
+// update is only reported once the stored value matches.
+func verifyDoneRatio(cfg Config, id string, want int) int {
+	got := getIssue(cfg, id).Issue.DoneRatio
+	if got != want {
+		exitErr(105, "integration_error",
+			fmt.Sprintf("Redmine accepted the update but done_ratio is %d, not %d", got, want), false,
+			[]string{"The instance may compute % done from the status (Administration > Settings > Issue tracking)",
+				"Or the field is not enabled for this tracker / not editable by this user"})
+	}
+	return got
 }
 
 func handleIssueAssign(args []string) {
@@ -1136,9 +1194,11 @@ func printHelp() {
 	fmt.Println("  issue comment <id>    Add comment to issue")
 	fmt.Println("    --text <text>         Comment text (required)")
 	fmt.Println("  issue edit <id>       Edit issue fields")
-	fmt.Println("    --description <t>     New description (required)")
+	fmt.Println("    --description <t>     New description")
+	fmt.Println("    --done-ratio <n>      Percent done, 0-100 (at least one of the two)")
 	fmt.Println("  issue status <id>     Change issue status")
 	fmt.Println("    --status-id <n>       Status ID (required)")
+	fmt.Println("    --done-ratio <n>      Also set percent done, 0-100")
 	fmt.Println("  issue assign <id>     Assign issue to user/group")
 	fmt.Println("    --assigned-to-id <n>  User/Group ID (required)")
 	fmt.Println("  user search <query>    Search users/groups/roles in project")
@@ -1177,6 +1237,8 @@ func printHelp() {
 	fmt.Println("  easyredmine-cli issue comment 61809 --text \"Looks good\"")
 	fmt.Println("  easyredmine-cli issue edit 61809 --description \"<p>Updated</p>\"")
 	fmt.Println("  easyredmine-cli issue status 61809 --status-id 51")
+	fmt.Println("  easyredmine-cli issue status 61809 --status-id 52 --done-ratio 100")
+	fmt.Println("  easyredmine-cli issue edit 61809 --done-ratio 50")
 	fmt.Println("  easyredmine-cli issue assign 61809 --assigned-to-id 199")
 	fmt.Println("  easyredmine-cli user search \"QA\" --project-id 1111")
 	fmt.Println("  easyredmine-cli update --check-only")
